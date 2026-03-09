@@ -11,6 +11,7 @@ namespace kv_cache_manager {
 
 class Hf3fsMempool;
 class Hf3fsCudaUtil;
+class Hf3fsMusaUtil;
 
 struct Hf3fsIovHandle {
     ::hf3fs_iov *iov{nullptr};
@@ -19,6 +20,9 @@ struct Hf3fsIovHandle {
     size_t iov_block_size{0};          // 每个共享内存块的大小, 0 表示单个大型共享内存块
     std::shared_ptr<Hf3fsMempool> iov_mempool;
     std::shared_ptr<Hf3fsCudaUtil> cuda_util;
+#ifdef USING_MUSA
+    std::shared_ptr<Hf3fsMusaUtil> musa_util;
+#endif
 };
 
 struct Hf3fsIorHandle {

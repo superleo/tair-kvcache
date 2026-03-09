@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "kv_cache_manager/client/src/internal/sdk/hf3fs_cuda_util.h"
+#include "kv_cache_manager/client/src/internal/sdk/hf3fs_musa_util.h"
 #include "kv_cache_manager/client/src/internal/sdk/hf3fs_mempool.h"
 #include "kv_cache_manager/common/logger.h"
 
@@ -44,6 +45,14 @@ ClientErrorCode Hf3fsSdk::Init(const std::shared_ptr<SdkBackendConfig> &sdk_back
         return ER_SDKINIT_ERROR;
     }
 
+#ifdef USING_MUSA
+    auto musa_util = std::make_shared<Hf3fsMusaUtil>();
+    if (!musa_util->Init()) {
+        KVCM_LOG_WARN("dist storage 3fs init failed, musa util init failed");
+        return ER_SDKINIT_ERROR;
+    }
+#endif
+
     usrbio_api_ = std::make_shared<Hf3fsUsrbioApi>();
 
     // read iov
@@ -58,6 +67,11 @@ ClientErrorCode Hf3fsSdk::Init(const std::shared_ptr<SdkBackendConfig> &sdk_back
         ReleaseIovHandle(read_iov_handle_);
         return ER_SDKINIT_ERROR;
     }
+
+#ifdef USING_MUSA
+    read_iov_handle_.musa_util = musa_util;
+    write_iov_handle_.musa_util = musa_util;
+#endif
 
     // TODO(LXQ): metrics
 
@@ -288,11 +302,19 @@ void Hf3fsSdk::ReleaseIovHandle(Hf3fsIovHandle &iov_handle) {
         if (iov_handle.cuda_util) {
             iov_handle.cuda_util->UnregisterHost(iov_handle.iov->base);
         }
+#ifdef USING_MUSA
+        if (iov_handle.musa_util) {
+            iov_handle.musa_util->UnregisterHost(iov_handle.iov->base);
+        }
+#endif
         DestroyIov(iov_handle.iov);
         iov_handle.iov = nullptr;
     }
     iov_handle.iov_mempool.reset();
     iov_handle.cuda_util.reset();
+#ifdef USING_MUSA
+    iov_handle.musa_util.reset();
+#endif
 }
 
 struct hf3fs_iov *Hf3fsSdk::CreateIov(const std::string &mountpoint, size_t iov_size, size_t iov_block_size) const {

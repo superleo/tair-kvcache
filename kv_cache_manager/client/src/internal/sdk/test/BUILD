@@ -113,6 +113,7 @@ cc_test(
     copts = ["-fno-access-control"],
     target_compatible_with = select({
         ":using_cuda": [],
+        ":using_musa": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     deps = [

@@ -138,7 +138,7 @@ ClientErrorCode TransferClientImpl::LoadKvCaches(const UriStrVec &uri_str_vec,
         if (need_print) {
             auto handle = sdk_buffer_check_pool_->GetCell();
             block_hashs = SdkBufferCheckUtil::GetBlocksHash(
-                block_buffers, handle->d_iovs, handle->d_crcs, handle->h_iovs, max_check_iov_num_, handle->cuda_stream);
+                block_buffers, handle->d_iovs, handle->d_crcs, handle->h_iovs, max_check_iov_num_, handle->gpu_stream);
         }
         PrintBlockHashAndUri("get_", uri_str_vec, block_hashs, trace_info);
     }
@@ -160,7 +160,7 @@ std::pair<ClientErrorCode, UriStrVec> TransferClientImpl::SaveKvCaches(const Uri
         if (need_print) {
             auto handle = sdk_buffer_check_pool_->GetCell();
             block_hashs = SdkBufferCheckUtil::GetBlocksHash(
-                block_buffers, handle->d_iovs, handle->d_crcs, handle->h_iovs, max_check_iov_num_, handle->cuda_stream);
+                block_buffers, handle->d_iovs, handle->d_crcs, handle->h_iovs, max_check_iov_num_, handle->gpu_stream);
         }
         PrintBlockHashAndUri("put_", uri_str_vec, block_hashs, trace_info);
     }

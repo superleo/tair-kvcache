@@ -48,7 +48,7 @@ constexpr uint32_t kDefaultThreadsPerBlock = 512;
 } // namespace
 
 std::vector<uint32_t> SdkBufferCheckUtil::GetIovsCrc(
-    const IovDevice *iovs_h_ptr, size_t iovs_size, IovDevice *iovs_d, uint32_t *crcs_d, cudaStream_t stream) {
+    const IovDevice *iovs_h_ptr, size_t iovs_size, IovDevice *iovs_d, uint32_t *crcs_d, GpuStream_t stream) {
     size_t cal_byte_size = std::min(min_cal_byte_size_, iovs_h_ptr->size / 2);
     if (cal_byte_size == 0) {
         return {};

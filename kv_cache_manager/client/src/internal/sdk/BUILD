@@ -176,7 +176,7 @@ genrule(
     srcs = ["sdk_buffer_check_util_musa.mu"],
     outs = ["sdk_buffer_check_util_musa.o"],
     cmd = """
-    /usr/local/musa/bin/mcc -x musa -std=c++20 -fPIC -c $< -o $@ -I. -I$(GENDIR)/../..
+    /usr/local/musa/bin/mcc -x musa -std=c++20 -fPIC -c $< -o $@ -I. -I$(GENDIR)/../.. -DUSING_MUSA
     """,
 )
 

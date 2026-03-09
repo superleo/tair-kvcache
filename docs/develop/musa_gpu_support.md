@@ -132,16 +132,12 @@ to work with either backend through a single type alias. CUDA builds resolve
 | `batch_gather_scatter_helper.py` | Modify | Conditional float8 dtype |
 
 ## 7. How to Build
+Only the client component depends on CUDA/MUSA; the rest of `kv_cache_manager` does not. Use client-only configs:
 
 ```bash
-# CUDA build (unchanged)
-bazel build //kv_cache_manager/... --config=cuda12
-
-# MUSA build
-bazel build //kv_cache_manager/... --config=musa
-
-# Client-only builds
+# Client with CUDA
 bazel build //kv_cache_manager/client/... --config=client_with_cuda
+# Client with MUSA
 bazel build //kv_cache_manager/client/... --config=client_with_musa
 ```
 
@@ -193,15 +189,11 @@ This PR is split into multiple commits for reviewer convenience:
    — All new MUSA files, build system changes, `#elif defined(USING_MUSA)`
    branches, Python device-agnostic helpers, and test scripts.
 
-## 10. Test Environment / Other Compilation Fixes
 
-- **PlanExecuteResult (manager)**: `cache_reclaimer.h` uses `std::future<PlanExecuteResult>` and must see the full type for destruction. The header now includes `schedule_plan_executor.h` (for `PlanExecuteResult`) and the redundant forward declaration was removed. This fixes the `static assertion failed: std::is_destructible<PlanExecuteResult>` error when building the manager.
-
-## 11. Future Work
+## 10. Future Work
 
 - Add `build:mooncake_musa` / `build:hf3fs_musa` / `build:tair_mempool_musa`
   once those backends need MUSA support
-- Add MUSA variant of `sm_copy_kernel.cu` in `tair_mempool`
 - Consider a unified `GpuUtil` base class or `std::variant` to replace
   parallel `cuda_util` / `musa_util` fields in `Hf3fsIovHandle`
 - Use the same pattern to add AMD ROCm / Intel oneAPI backends

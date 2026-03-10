@@ -1,4 +1,5 @@
 #include "kv_cache_manager/client/src/internal/sdk/sdk_buffer_check_util.h"
+#include "kv_cache_manager/client/src/internal/sdk/cuda_util.h"
 #include "kv_cache_manager/common/env_util.h"
 #include "kv_cache_manager/common/hash_util.h"
 namespace kv_cache_manager {

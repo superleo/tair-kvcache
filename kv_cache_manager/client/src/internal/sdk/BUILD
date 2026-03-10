@@ -190,7 +190,7 @@ cc_library(
         "musa_util.h",
         "sdk_buffer_check_util.h",
     ],
-    linkopts = ["-L/usr/local/musa/lib", "-lmusart"],
+    linkopts = ["-L/usr/local/musa/lib", "-lmusart", "-Wl,-rpath,/usr/local/musa/lib"],
     target_compatible_with = select({
         ":using_musa": [],
         "//conditions:default": ["@platforms//:incompatible"],

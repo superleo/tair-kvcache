@@ -60,11 +60,14 @@ def calc_metrics(requests: list[RequestStats]) -> dict:
     total_output = 0
     completed = 0
     total_reused_tokens = 0
+    total_disk_hit_tokens = 0
+    queue_durs = []
     for req in requests:
         if not req.is_complete():
             continue
         completed += 1
         ttfts.append(req.gen_token_latencies[0])
+        queue_durs.append(req.queue_end - req.queue_start)
         if len(req.gen_token_latencies) > 1:
             # output length > 1
             tpots.append(np.mean(req.gen_token_latencies[1:]))
@@ -74,6 +77,7 @@ def calc_metrics(requests: list[RequestStats]) -> dict:
         total_input += req.input_length
         total_output += req.output_length
         total_reused_tokens += req.final_reused_tokens
+        total_disk_hit_tokens += req.prefetch_complete_tokens
     return {
         "num_requests": len(requests),
         "completed": completed,
@@ -87,12 +91,16 @@ def calc_metrics(requests: list[RequestStats]) -> dict:
         "prefix_cache_reused_ratio": 0
         if total_input == 0
         else total_reused_tokens / total_input,
+        "disk_prefetch_ratio": 0
+        if total_input == 0
+        else total_disk_hit_tokens / total_input,
         "mean_ttft_ms": np.mean(ttfts or 0) * 1000,
         "median_ttft_ms": np.median(ttfts or 0) * 1000,
         "std_ttft_ms": np.std(ttfts or 0) * 1000,
         "p90_ttft_ms": np.percentile(ttfts or 0, 90) * 1000,
         "p95_ttft_ms": np.percentile(ttfts or 0, 95) * 1000,
         "p99_ttft_ms": np.percentile(ttfts or 0, 99) * 1000,
+        "mean_queue_ms": np.mean(queue_durs or 0) * 1000,
         "mean_tpot_ms": np.mean(tpots or 0) * 1000,
         "median_tpot_ms": np.median(tpots or 0) * 1000,
         "std_tpot_ms": np.std(tpots or 0) * 1000,

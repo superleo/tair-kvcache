@@ -1,3 +1,4 @@
+# MUSA runtime is provided by vendor toolkit and is subject to third-party terms.
 licenses(["restricted"])
 
 package(default_visibility = ["//visibility:public"])

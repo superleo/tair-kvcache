@@ -39,14 +39,18 @@ ClientErrorCode Hf3fsSdk::Init(const std::shared_ptr<SdkBackendConfig> &sdk_back
     }
     config_ = hf3fs_config;
 
-    auto cuda_util = std::make_shared<Hf3fsCudaUtil>();
+    std::shared_ptr<Hf3fsCudaUtil> cuda_util = nullptr;
+#ifdef USING_CUDA
+    cuda_util = std::make_shared<Hf3fsCudaUtil>();
     if (!cuda_util->Init()) {
         KVCM_LOG_WARN("dist storage 3fs init failed, cuda util init failed");
         return ER_SDKINIT_ERROR;
     }
+#endif
 
+    std::shared_ptr<Hf3fsMusaUtil> musa_util = nullptr;
 #ifdef USING_MUSA
-    auto musa_util = std::make_shared<Hf3fsMusaUtil>();
+    musa_util = std::make_shared<Hf3fsMusaUtil>();
     if (!musa_util->Init()) {
         KVCM_LOG_WARN("dist storage 3fs init failed, musa util init failed");
         return ER_SDKINIT_ERROR;
@@ -56,22 +60,19 @@ ClientErrorCode Hf3fsSdk::Init(const std::shared_ptr<SdkBackendConfig> &sdk_back
     usrbio_api_ = std::make_shared<Hf3fsUsrbioApi>();
 
     // read iov
-    if (!InitIovHandle(read_iov_handle_, config_->read_iov_block_size(), config_->read_iov_size(), cuda_util)) {
+    if (!InitIovHandle(
+            read_iov_handle_, config_->read_iov_block_size(), config_->read_iov_size(), cuda_util, musa_util)) {
         KVCM_LOG_WARN("init read iov handle failed");
         return ER_SDKINIT_ERROR;
     }
 
     // write iov
-    if (!InitIovHandle(write_iov_handle_, config_->write_iov_block_size(), config_->write_iov_size(), cuda_util)) {
+    if (!InitIovHandle(
+            write_iov_handle_, config_->write_iov_block_size(), config_->write_iov_size(), cuda_util, musa_util)) {
         KVCM_LOG_WARN("init write iov handle failed");
         ReleaseIovHandle(read_iov_handle_);
         return ER_SDKINIT_ERROR;
     }
-
-#ifdef USING_MUSA
-    read_iov_handle_.musa_util = musa_util;
-    write_iov_handle_.musa_util = musa_util;
-#endif
 
     // TODO(LXQ): metrics
 
@@ -264,7 +265,8 @@ void Hf3fsSdk::DeleteRemainingIovShm() const {
 bool Hf3fsSdk::InitIovHandle(Hf3fsIovHandle &handle,
                              size_t iov_block_size,
                              size_t iov_size,
-                             const std::shared_ptr<Hf3fsCudaUtil> &cuda_util) const {
+                             const std::shared_ptr<Hf3fsCudaUtil> &cuda_util,
+                             const std::shared_ptr<Hf3fsMusaUtil> &musa_util) const {
     if (iov_block_size != 0 && iov_size % iov_block_size != 0) {
         iov_size = (iov_size / iov_block_size + 1) * iov_block_size;
     }
@@ -285,7 +287,7 @@ bool Hf3fsSdk::InitIovHandle(Hf3fsIovHandle &handle,
         return false;
     }
 
-    if (!cuda_util->RegisterHost(iov->base, iov_size)) {
+    if (cuda_util != nullptr && !cuda_util->RegisterHost(iov->base, iov_size)) {
         KVCM_LOG_WARN("cuda register iov failed, iov base: %p, expect iov size: %zu, actual iov size: %zu",
                       iov->base,
                       iov_size,
@@ -293,15 +295,34 @@ bool Hf3fsSdk::InitIovHandle(Hf3fsIovHandle &handle,
         DestroyIov(iov);
         return false;
     }
-    handle = {iov, nullptr, iov_size, iov_block_size, mempool, cuda_util};
+    if (musa_util != nullptr && !musa_util->RegisterHost(iov->base, iov_size)) {
+        KVCM_LOG_WARN("musa register iov failed, iov base: %p, expect iov size: %zu, actual iov size: %zu",
+                      iov->base,
+                      iov_size,
+                      iov->size);
+        DestroyIov(iov);
+        return false;
+    }
+    handle.iov = iov;
+    handle.iov_size = iov_size;
+    handle.iov_block_size = iov_block_size;
+    handle.iov_mempool = mempool;
+#ifdef USING_CUDA
+    handle.cuda_util = cuda_util;
+#endif
+#ifdef USING_MUSA
+    handle.musa_util = musa_util;
+#endif
     return true;
 }
 
 void Hf3fsSdk::ReleaseIovHandle(Hf3fsIovHandle &iov_handle) {
     if (iov_handle.iov != nullptr) {
+#ifdef USING_CUDA
         if (iov_handle.cuda_util) {
             iov_handle.cuda_util->UnregisterHost(iov_handle.iov->base);
         }
+#endif
 #ifdef USING_MUSA
         if (iov_handle.musa_util) {
             iov_handle.musa_util->UnregisterHost(iov_handle.iov->base);
@@ -311,7 +332,9 @@ void Hf3fsSdk::ReleaseIovHandle(Hf3fsIovHandle &iov_handle) {
         iov_handle.iov = nullptr;
     }
     iov_handle.iov_mempool.reset();
+#ifdef USING_CUDA
     iov_handle.cuda_util.reset();
+#endif
 #ifdef USING_MUSA
     iov_handle.musa_util.reset();
 #endif

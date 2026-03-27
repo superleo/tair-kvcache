@@ -99,8 +99,8 @@ to work with either backend through a single type alias. CUDA builds resolve
 
 ### 5.3 Python Connector Layer
 
-- `data_transfer.py` — Added `_get_device_module()` helper that returns `torch.musa` when available, otherwise `torch.cuda`. Replaced all `torch.cuda.Stream()`, `torch.cuda.Event()`, `torch.cuda.stream()`, `torch.cuda.set_device()` with `_device_mod.*` equivalents.
-- `v1_connector.py` — Imported `_device_mod` from `data_transfer.py`; replaced `torch.cuda.Stream()`, `torch.cuda.Event()`, `torch.cuda.current_stream()`.
+- `data_transfer.py` — Added `_get_device_module(device)` helper and select device module from runtime device (`torch.get_device_module(device)` when available). Replaced hard-coded `torch.cuda.*` stream/event calls with device-module equivalents.
+- `v1_connector.py` — Select device module from actual KV cache tensor device in `register_kv_caches`, then initialize stream/event on that module. This keeps connector device choice aligned with inference engine runtime.
 - `batch_gather_scatter_helper.py` — Made `tl.float8e4nv` conditional: `tl.float8e4nv if hasattr(tl, 'float8e4nv') else tl.float8e4b8` to support non-NVIDIA Triton backends.
 
 ## 6. File Change Summary
@@ -197,3 +197,13 @@ This PR is split into multiple commits for reviewer convenience:
 - Consider a unified `GpuUtil` base class or `std::variant` to replace
   parallel `cuda_util` / `musa_util` fields in `Hf3fsIovHandle`
 - Use the same pattern to add AMD ROCm / Intel oneAPI backends
+
+## 11. License and Distribution Notes
+
+- `3rdparty/gpus/musa/BUILD.tpl` uses `licenses(["restricted"])` to mark
+  third-party runtime constraints.
+- MUSA runtime libraries are linked from local toolkit installation via
+  `musa_configure`; this repository does not vendor or re-distribute proprietary
+  MUSA driver/runtime binaries.
+- Production distribution should ensure target environments install MUSA
+  toolkit/driver according to vendor terms before enabling `--config=musa`.

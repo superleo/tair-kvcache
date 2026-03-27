@@ -19,7 +19,9 @@ struct Hf3fsIovHandle {
     size_t iov_size{0};                // iov 的共享内存大小
     size_t iov_block_size{0};          // 每个共享内存块的大小, 0 表示单个大型共享内存块
     std::shared_ptr<Hf3fsMempool> iov_mempool;
+#ifdef USING_CUDA
     std::shared_ptr<Hf3fsCudaUtil> cuda_util;
+#endif
 #ifdef USING_MUSA
     std::shared_ptr<Hf3fsMusaUtil> musa_util;
 #endif

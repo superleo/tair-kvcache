@@ -82,6 +82,9 @@ SdkBufferCheckPool::SdkBufferCheckPool(size_t cell_num) { cells_.resize(cell_num
 
 SdkBufferCheckPool::~SdkBufferCheckPool() {
     for (const auto &cell : cells_) {
+        if (cell.gpu_stream) {
+            CHECK_MUSA_ERROR(musaStreamDestroy(cell.gpu_stream), "musa stream destroy failed");
+        }
         if (cell.h_iovs) {
             CHECK_MUSA_ERROR(musaFreeHost(cell.h_iovs), "musa free iovs_h_mem[%p] failed", cell.h_iovs);
         }

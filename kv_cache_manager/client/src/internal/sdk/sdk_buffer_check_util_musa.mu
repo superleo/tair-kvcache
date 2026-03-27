@@ -44,6 +44,17 @@ __global__ void GetIovsCrcDevice(const IovDevice *iovs, int iovs_size, uint32_t 
 
 constexpr uint32_t kDefaultThreadsPerBlock = 512;
 
+struct ScopedMusaStream {
+    musaStream_t h = nullptr;
+    ~ScopedMusaStream() {
+        if (h != nullptr) {
+            musaStreamDestroy(h);
+        }
+    }
+    ScopedMusaStream(const ScopedMusaStream &) = delete;
+    ScopedMusaStream &operator=(const ScopedMusaStream &) = delete;
+};
+
 }  // namespace
 
 std::vector<uint32_t> SdkBufferCheckUtil::GetIovsCrc(
@@ -52,15 +63,16 @@ std::vector<uint32_t> SdkBufferCheckUtil::GetIovsCrc(
     if (cal_byte_size == 0) {
         return {};
     }
-    GpuStream_t actual_stream = stream;
-    GpuStream_t tmp_stream = nullptr;
-    if (actual_stream == nullptr) {
-        musaStream_t musa_tmp_stream;
-        CHECK_MUSA_ERROR_RETURN(musaStreamCreateWithFlags(&musa_tmp_stream, 0), {}, "musaStreamCreate fail");
-        tmp_stream = static_cast<GpuStream_t>(musa_tmp_stream);
-        actual_stream = tmp_stream;
+    ScopedMusaStream owned_tmp;
+    musaStream_t musa_actual_stream;
+    if (stream == nullptr) {
+        musaStream_t tmp{};
+        CHECK_MUSA_ERROR_RETURN(musaStreamCreateWithFlags(&tmp, 0), {}, "musaStreamCreate fail");
+        owned_tmp.h = tmp;
+        musa_actual_stream = tmp;
+    } else {
+        musa_actual_stream = static_cast<musaStream_t>(stream);
     }
-    musaStream_t musa_actual_stream = static_cast<musaStream_t>(actual_stream);
     auto iovs_byte_size = sizeof(IovDevice) * iovs_size;
     CHECK_MUSA_ERROR_RETURN(
         musaMemcpyAsync(iovs_d, iovs_h_ptr, iovs_byte_size, musaMemcpyHostToDevice, musa_actual_stream), {},
@@ -74,9 +86,6 @@ std::vector<uint32_t> SdkBufferCheckUtil::GetIovsCrc(
         musaMemcpyAsync(crcs.data(), crcs_d, crc_byte_size, musaMemcpyDeviceToHost, musa_actual_stream), {},
         "musaMemcpy crcs_d fail");
     CHECK_MUSA_ERROR_RETURN(musaStreamSynchronize(musa_actual_stream), {}, "musa stream synchronize fail");
-    if (tmp_stream != nullptr) {
-        musaStreamDestroy(static_cast<musaStream_t>(tmp_stream));
-    }
     return crcs;
 }
 

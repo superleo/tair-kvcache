@@ -179,6 +179,10 @@ genrule(
     cmd = """
     /usr/local/musa/bin/mcc -x musa -std=c++20 -fPIC -c $< -o $@ -I. -I$(GENDIR)/../.. -DUSING_MUSA
     """,
+    target_compatible_with = select({
+        ":using_musa": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
 )
 
 cc_library(

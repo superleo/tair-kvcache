@@ -2,7 +2,7 @@ from dataclasses import asdict
 import asyncio
 import json
 import os
-from typing import Iterator
+from typing import Iterator, Optional
 import numpy as np
 import torch
 
@@ -47,8 +47,18 @@ from sglang.srt.entrypoints.engine import Engine  # noqa
 from sglang.srt.server_args import ServerArgs  # noqa
 from transformers import AutoTokenizer  # noqa
 
+from sglang.version import __version__ as sglang_version  # noqa
+from hisim.simulation.sglang.version import COMPATIBLE_VERSIONS  # noqa
+
 
 logger = get_logger("hisim")
+
+
+if sglang_version not in COMPATIBLE_VERSIONS:
+    logger.warning(
+        f"Current SGLang version {sglang_version} is not in the compatible versions "
+        f"{COMPATIBLE_VERSIONS}, so errors may occur."
+    )
 
 
 class SGLangBenchmarkRunner(BaseBenchmarkRunner):
@@ -60,13 +70,19 @@ class SGLangBenchmarkRunner(BaseBenchmarkRunner):
         self.server_args = server_args
         self.engine = Engine(**asdict(server_args))
 
+        self._tokenizer: AutoTokenizer = None
+
     def flush_cache(self):
         self.engine.flush_cache()
+
+    def reset_storage_cache(self):
+        self.engine.clear_hicache_storage()
 
     def get_request(
         self,
         dataset: BaseDataset,
         ignore_timestamp: bool = False,
+        with_queue_start: bool = False,
         request_rate: float = float("inf"),
     ) -> Iterator[tuple[GenericRequest, dict]]:
         yield_delay = 0
@@ -81,15 +97,31 @@ class SGLangBenchmarkRunner(BaseBenchmarkRunner):
                 "total_request": len(dataset),  # include the warmup requests.
                 "created_time": created_time,
             }
+            if with_queue_start:
+                simulation_params["queue_start"] = req.custom_params.get("queue_start")
+
             yield (req, simulation_params)
 
     async def async_benchmark(
-        self, benchmark_config: BenchmarkConfig, dataset_args: DatasetArgs
+        self,
+        benchmark_config: BenchmarkConfig,
+        dataset: Optional[BaseDataset] = None,
+        dataset_args: Optional[DatasetArgs] = None,
     ):
-        dataset = get_dataset(
-            dataset_args,
-            tokenizer=AutoTokenizer.from_pretrained(self.server_args.model_path),
-        )
+        if (dataset is None) == (dataset_args is None):
+            raise ValueError(
+                "Exactly one of `dataset` or `dataset_args` must be provided."
+            )
+
+        if dataset is None and dataset_args is not None:
+            if self._tokenizer is None:
+                self._tokenizer = AutoTokenizer.from_pretrained(
+                    self.server_args.model_path
+                )
+            dataset = get_dataset(
+                dataset_args,
+                tokenizer=self._tokenizer,
+            )
 
         await self.engine.tokenizer_manager.start_profile(profile_prefix="reset")
 
@@ -103,6 +135,7 @@ class SGLangBenchmarkRunner(BaseBenchmarkRunner):
         for req, simulation_params in self.get_request(
             dataset,
             ignore_timestamp=benchmark_config.ignore_request_timestamp,
+            with_queue_start=benchmark_config.with_queue_start,
             request_rate=benchmark_config.request_rate,
         ):
             task = asyncio.create_task(
@@ -140,10 +173,11 @@ class SGLangBenchmarkRunner(BaseBenchmarkRunner):
     def benchmark(
         self,
         benchmark_config: BenchmarkConfig,
-        dataset_args: DatasetArgs,
+        dataset: Optional[BaseDataset] = None,
+        dataset_args: Optional[DatasetArgs] = None,
     ):
         return self.engine.loop.run_until_complete(
-            self.async_benchmark(benchmark_config, dataset_args)
+            self.async_benchmark(benchmark_config, dataset, dataset_args)
         )
 
     def get_iteration_stats(self) -> list[dict]:

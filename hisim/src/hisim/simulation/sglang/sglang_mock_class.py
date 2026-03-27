@@ -1,6 +1,7 @@
 from typing import List, Union, Optional, Any
 import tempfile
 import time
+from pathlib import Path
 import numpy as np
 import torch
 import psutil
@@ -10,13 +11,20 @@ from functools import wraps
 
 from hisim.utils.logger import get_logger
 from hisim.simulation.manager import StateManager, ConfigManager, Envs
+from sglang.srt.mem_cache.hicache_storage import (
+    HiCacheStorageExtraInfo,
+)
+from hisim.simulation.sglang.version import VersionDispatcher
 
 try:
     from kv_cache_manager.optimizer.pybind import kvcm_py_optimizer
 except ImportError:
     kvcm_py_optimizer = None
 
+# from sglang.srt.managers.schedule_batch import Req
+
 logger = get_logger("hisim")
+_CURRENT_DIR = Path(__file__).parent.resolve()
 
 
 def alloc_extend_cpu(
@@ -205,13 +213,34 @@ class MockReqToTokenPool:
 
         self.free_slots = list(range(size))
 
+        _version_dispatcher = VersionDispatcher()
+        _version_dispatcher.register_method(
+            "alloc",
+            ["0.5.6", "0.5.6.post1", "0.5.6.post2", "0.5.7", "0.5.8", "0.5.8.post1"],
+            self._alloc_v1,
+        )
+        _version_dispatcher.register_method("alloc", ["0.5.9"], self._alloc_v2)
+
+        _version_dispatcher.register_method(
+            "free",
+            ["0.5.6", "0.5.6.post1", "0.5.6.post2", "0.5.7", "0.5.8", "0.5.8.post1"],
+            self._free_v1,
+        )
+        _version_dispatcher.register_method("free", ["0.5.9"], self._free_v2)
+
+        self._alloc_func = _version_dispatcher.get_compat_method("alloc")
+        self._free_func = _version_dispatcher.get_compat_method("free")
+
     def write(self, indices, values):
         self.req_to_token[indices] = values
 
     def available_size(self):
         return len(self.free_slots)
 
-    def alloc(self, need_size: int) -> List[int]:
+    def alloc(self, *args, **kwargs):
+        return self._alloc_func(*args, **kwargs)
+
+    def _alloc_v1(self, need_size: int) -> List[int]:
         if need_size > len(self.free_slots):
             return None
 
@@ -220,11 +249,41 @@ class MockReqToTokenPool:
 
         return select_index
 
-    def free(self, free_index: Union[int, List[int]]):
+    def _alloc_v2(self, reqs: list) -> Optional[List[int]]:
+        chunked = [i for i, r in enumerate(reqs) if r.req_pool_idx is not None]
+        if not any(r.is_dllm() for r in reqs):
+            assert len(chunked) <= 1, (
+                "only one chunked request may reuse req_pool_idx in a batch"
+            )
+        assert all(
+            reqs[i].is_chunked > 0 or reqs[i].kv_committed_len > 0 for i in chunked
+        ), "request has req_pool_idx but is not chunked"
+
+        need_size = len(reqs) - len(chunked)
+        if need_size > len(self.free_slots):
+            return None
+        select_index = self.free_slots[:need_size]
+        self.free_slots = self.free_slots[need_size:]
+        offset = 0
+        for r in reqs:
+            if r.req_pool_idx is None:
+                r.req_pool_idx = select_index[offset]
+                offset += 1
+        return [r.req_pool_idx for r in reqs]
+
+    def free(self, *args, **kwargs):
+        return self._free_func(*args, **kwargs)
+
+    def _free_v1(self, free_index: Union[int, List[int]]):
         if isinstance(free_index, (int,)):
             self.free_slots.append(free_index)
         else:
             self.free_slots.extend(free_index)
+
+    def _free_v2(self, req):
+        assert req.req_pool_idx is not None, "request must have req_pool_idx"
+        self.free_slots.append(req.req_pool_idx)
+        req.req_pool_idx = None
 
     def clear(self):
         self.free_slots = list(range(self.size))
@@ -991,20 +1050,27 @@ class MockHiCacheStorage:
         # Initialize kvcm based on reference examples
         self.temp_dir = tempfile.mkdtemp()
         logger.info(f"Using temporary directory: {self.temp_dir}")
-        optimizer_config = kvcm_py_optimizer.OptimizerConfig()
-        tier = kvcm_py_optimizer.TierConfig()
-        tier.set_unique_name("tier1")
-        tier.set_storage_type(kvcm_py_optimizer.DataStorageType.DATA_STORAGE_TYPE_HF3FS)
-        tier.set_priority(0)
-        tier.set_eviction_policy_type(kvcm_py_optimizer.EvictionPolicyType.LRU)
-        tier.set_capacity(1000000)
-        tier.set_band_width_mbps(1000)
-        optimizer_config.set_tiers([tier])
-        optimizer_config.set_trace_type(kvcm_py_optimizer.TraceType.TRACE_PUBLISHER_LOG)
-        optimizer_config.set_block_size(1)
 
-        optimizer_config.set_rw_separation(True)
-        self.storage_manager = kvcm_py_optimizer.OptimizerManager(optimizer_config)
+        project_root = _CURRENT_DIR.parents[4]
+        config_path = (
+            project_root
+            / "kv_cache_manager"
+            / "optimizer"
+            / "test"
+            / "testdata"
+            / "optimizer_startup_config_load.json"
+        )
+        config_path = config_path.resolve()
+        self.config_loader = kvcm_py_optimizer.OptimizerConfigLoader()
+
+        if not self.config_loader.load(str(config_path)):
+            raise RuntimeError(f"Failed to load optimizer config from {config_path}")
+        self.config = self.config_loader.config()
+        self.storage_manager = kvcm_py_optimizer.OptimizerManager(self.config)
+        self.storage_manager.Init()
+
+        # Multi-instance not supported yet; using a single shared instance_id.
+        self.instance_id = "3780643326877293460"
 
     def tearDown(self):
         if hasattr(self, "temp_dir"):
@@ -1034,17 +1100,28 @@ class MockHiCacheStorage:
         self,
         keys: List[str],
         values: Optional[Any] = None,
+        extra_info: HiCacheStorageExtraInfo = None,
         target_locations: Optional[Any] = None,
         target_sizes: Optional[Any] = None,
     ) -> bool:
         if hasattr(self, "storage_manager"):
-            int_hash_keys = [_pass_str_to_block_ids(key) for key in keys]
+            if extra_info and extra_info.prefix_keys is not None:
+                complete_prefix_hashs = extra_info.prefix_keys + keys
+            else:
+                complete_prefix_hashs = keys
+            int_hash_keys = [
+                _pass_str_to_block_ids(key) for key in complete_prefix_hashs
+            ]
             # insert to kvcm
             trace_id = "1"
             write_timestamp = int(time.time() * 1000)
             write_token_ids = [1]
             self.storage_manager.WriteCache(
-                trace_id, write_timestamp, int_hash_keys, write_token_ids
+                self.instance_id,
+                trace_id,
+                write_timestamp,
+                int_hash_keys,
+                write_token_ids,
             )
             return True
         else:
@@ -1070,7 +1147,12 @@ class MockHiCacheStorage:
             read_token_ids = [1]
             mask_offset = 0
             res = self.storage_manager.GetCacheLocation(
-                trace_id, read_timestamp, int_hash_keys, read_token_ids, mask_offset
+                self.instance_id,
+                trace_id,
+                read_timestamp,
+                int_hash_keys,
+                read_token_ids,
+                mask_offset,
             )
             logger.debug(f"{res.kvcm_hit_length=}")
             return res.kvcm_hit_length
@@ -1082,10 +1164,8 @@ class MockHiCacheStorage:
 
     def clear(self) -> bool:
         if hasattr(self, "storage_manager"):
-            logger.warning("KVCM has not yet provided an interface to clear the cache.")
-            self.tearDown()
-            self.storage_manager = None
-            self.init_kvcm()
+            logger.info("Clear all storage cache in kvcm.")
+            self.storage_manager.ClearAllCaches()
             return True
         else:
             self.storage.clear()

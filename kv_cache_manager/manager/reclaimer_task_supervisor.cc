@@ -37,6 +37,10 @@ void ReclaimerTaskSupervisor::Submit(const std::string &trace_id, CacheMetaDelRe
     cell->result = schedule_plan_executor_->Submit(request);
     if (cell->result.valid()) {
         cell_queue_.Push(cell);
+    } else {
+        KVCM_LOG_ERROR("Submit CacheMetaDelRequest instance_id[%s] trace_id[%s] failed",
+                       request.instance_id.c_str(),
+                       trace_id.c_str());
     }
 }
 
@@ -47,6 +51,10 @@ void ReclaimerTaskSupervisor::Submit(const std::string &trace_id, CacheLocationD
     cell->result = schedule_plan_executor_->Submit(request);
     if (cell->result.valid()) {
         cell_queue_.Push(cell);
+    } else {
+        KVCM_LOG_ERROR("Submit CacheLocationDelRequest instance_id[%s] trace_id[%s] failed",
+                       request.instance_id.c_str(),
+                       trace_id.c_str());
     }
 }
 
@@ -61,11 +69,26 @@ void ReclaimerTaskSupervisor::WorkLoop() {
             auto status = cell->result.wait_for(kDefaultFutureWaitTime);
             if (status == std::future_status::ready) {
                 auto del_result = cell->result.get();
-                KVCM_LOG_INFO("delete task finish : instance_id[%s] trace_id [%s] ec[%d] message[%s]",
-                              cell->instance_id.c_str(),
-                              cell->trace_id.c_str(),
-                              del_result.status,
-                              del_result.error_message.c_str());
+                if (del_result.status != ErrorCode::EC_OK) {
+                    // retry
+                    CacheLocationDelRequest request;
+                    request.instance_id = cell->instance_id;
+                    request.delay = std::chrono::seconds(0);
+                    for (const auto &meta : del_result.fail_metas) {
+                        request.block_keys.push_back(meta.block_key);
+                        request.location_ids.push_back(meta.location_ids);
+                    }
+                    cell->result = schedule_plan_executor_->Submit(request);
+                    if (cell->result.valid()) {
+                        cell_queue_.Push(cell);
+                    }
+                } else {
+                    KVCM_LOG_INFO("delete task finish : instance_id[%s] trace_id [%s] ec[%d] message[%s]",
+                                  cell->instance_id.c_str(),
+                                  cell->trace_id.c_str(),
+                                  del_result.status,
+                                  del_result.error_message.c_str());
+                }
             } else {
                 cell_queue_.Push(cell);
             }

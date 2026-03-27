@@ -36,9 +36,24 @@ from hisim.simulation.utils import (
     calc_metrics,
     estimate_kv_cache_pool_capacity,
 )
+from hisim.simulation.sglang.version import VersionDispatcher
 
 
 logger = get_logger("hisim")
+
+
+class C_EngineHook(BaseHook):
+    HOOK_CLASS_NAME = "Engine"
+    HOOK_MODULE_NAME = "sglang.srt.entrypoints.engine"
+
+    @classmethod
+    def hook(cls, target):
+        def hook_clear_hicache_storage(self):
+            return self.loop.run_until_complete(
+                self.tokenizer_manager.clear_hicache_storage()
+            )
+
+        target.clear_hicache_storage = hook_clear_hicache_storage
 
 
 class C_TokenizerManagerHook(BaseHook):
@@ -51,7 +66,14 @@ class C_TokenizerManagerHook(BaseHook):
 
         # When running with blocking mode, send the created time to schedule.
         def wrapped_send_one_request(self, obj, tokenized_obj, created_time):
-            setattr(tokenized_obj, "created_time", created_time)
+            if obj.__class__.__name__ == "GenerateReqInput":
+                if (
+                    tokenized_obj.sampling_params.custom_params is not None
+                    and "simulation" in tokenized_obj.sampling_params.custom_params
+                ):
+                    tokenized_obj.sampling_params.custom_params["simulation"][
+                        "server_created_time"
+                    ] = created_time
             return original_send_one_request(self, obj, tokenized_obj, created_time)
 
         target._send_one_request = wrapped_send_one_request
@@ -63,6 +85,8 @@ class C_ModelRunnerHook(BaseHook):
 
     @classmethod
     def hook(cls, target):
+        _version_dispatcher = VersionDispatcher()
+
         def override_initialize(self, *args, **kwargs):
             class MockModel:
                 def forward(self):
@@ -168,9 +192,24 @@ class C_ModelRunnerHook(BaseHook):
             self.attn_backend = None
             self.graph_mem_usage = 0
             self.weight_load_mem_usage = 10
+
+            self.max_running_requests = min(
+                (
+                    self.max_total_num_tokens // 2
+                    if self.server_args.max_running_requests is None
+                    else self.server_args.max_running_requests
+                    // (
+                        self.server_args.dp_size
+                        if self.server_args.enable_dp_attention
+                        else 1
+                    )
+                ),
+                self.req_to_token_pool.size,
+            )
+
             return
 
-        def wrapped_forward(self, *args, **kwargs):
+        def wrapped_forward_v1(self, *args, **kwargs):
             batch = args[0]
             from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 
@@ -182,6 +221,24 @@ class C_ModelRunnerHook(BaseHook):
             )
 
             return output, False
+
+        _version_dispatcher.register_method(
+            "forward", ["0.5.6", "0.5.6.post1", "0.5.6.post2"], wrapped_forward_v1
+        )
+
+        def wrapped_forward_v2(self, *args, **kwargs):
+            from sglang.srt.model_executor.model_runner import ModelRunnerOutput
+
+            output, _ = wrapped_forward_v1(self, *args, **kwargs)
+            return ModelRunnerOutput(
+                logits_output=output,
+                can_run_graph=False,
+                expert_distribution_metrics=None,
+            )
+
+        _version_dispatcher.register_method(
+            "forward", ["0.5.7", "0.5.8", "0.5.8.post1", "0.5.9"], wrapped_forward_v2
+        )
 
         def wrapped_sample(self, *args, **kwargs):
             logits = args[0]
@@ -196,7 +253,7 @@ class C_ModelRunnerHook(BaseHook):
             return None
 
         target.initialize = override_initialize
-        target.forward = wrapped_forward
+        target.forward = _version_dispatcher.get_compat_method("forward")
         target.sample = wrapped_sample
         target.compute_logprobs_only = wrapped_compute_logprobs_only
 
@@ -222,8 +279,6 @@ class C_HiCacheController(BaseHook):
 
     @classmethod
     def hook(cls, target):
-        original_reset = target.reset
-
         def override_backup_thread_func(self, *args, **kwargs):
             # Async thread: perform no action
             # The action will be performed by `handle_backup_operation`
@@ -233,11 +288,6 @@ class C_HiCacheController(BaseHook):
             # Async thread: perform no action
             # The action will be performed by `handle_prefetch_operation`
             pass
-
-        def override_reset(self):
-            if hasattr(self, "storage_backend"):
-                self.storage_backend.clear()
-            original_reset(self)
 
         def handle_backup_operation(self):
             if not self.enable_storage:
@@ -296,6 +346,9 @@ class C_HiCacheController(BaseHook):
                     self.append_host_mem_release(
                         operation.host_indices[storage_hit_count:]
                     )
+                # update request states
+                req_stats = C_SchedulerHook.REQUEST_STATS[operation.request_id]
+                req_stats.prefetch_complete_tokens = operation.completed_tokens
 
             while remain_dur > 0:
                 try:
@@ -347,6 +400,9 @@ class C_HiCacheController(BaseHook):
                         # TODO: Track the prefetch operation according to the global clock
                         operation.mark_terminate()
                         remain_dur -= prefetch_dur
+                    # update request states
+                    req_stats = C_SchedulerHook.REQUEST_STATS[operation.request_id]
+                    req_stats.prefetch_complete_tokens = operation.completed_tokens
                     # Release host memory after current operation is finished
                     self.append_host_mem_release(
                         operation.host_indices[storage_hit_count:]
@@ -355,11 +411,21 @@ class C_HiCacheController(BaseHook):
                 except Empty:
                     return
 
+        def override_generic_page_set(
+            self, hash_values, host_indices, extra_info=None
+        ) -> bool:
+            # Always pass extra_info to storage_backend.
+            data = [
+                self.mem_pool_host.get_data_page(host_indices[i * self.page_size])
+                for i in range(len(hash_values))
+            ]
+            return self.storage_backend.batch_set(hash_values, data, extra_info)
+
         target.prefetch_thread_func = override_prefetch_thread_func
         target.backup_thread_func = override_backup_thread_func
         target.handle_backup_operation = handle_backup_operation
         target.handle_prefetch_operation = handle_prefetch_operation
-        target.reset = override_reset
+        target._generic_page_set = override_generic_page_set
 
 
 class C_HiRadixCacheHook(BaseHook):
@@ -369,6 +435,12 @@ class C_HiRadixCacheHook(BaseHook):
     @classmethod
     def hook(cls, target):
         original_check_hicache_events = target.check_hicache_events
+        original_reset = target.reset
+
+        def wrapped_reset(self):
+            if hasattr(self, "cache_controller"):
+                self.cache_controller.handle_backup_operation()
+            original_reset(self)
 
         def override_init(self, params, server_args):
             if server_args.hicache_io_backend == "direct":
@@ -460,6 +532,9 @@ class C_HiRadixCacheHook(BaseHook):
                 1 if server_args.hicache_write_policy == "write_through" else 2
             )
             self.load_back_threshold = 10
+            # Version: 0.5.9
+            self.prefetch_loaded_tokens_by_reqid: dict[str, int] = {}
+            self.evictable_host_leaves = set()
             # super().__init__(params=params)
             target.__mro__[1].__init__(self, params=params)
 
@@ -471,6 +546,7 @@ class C_HiRadixCacheHook(BaseHook):
 
         target.__init__ = override_init
         target.check_hicache_events = wrapped_check_hicache_events
+        target.reset = wrapped_reset
 
 
 class C_StorageBackendFactory(BaseHook):
@@ -564,66 +640,72 @@ class C_SchedulerHook(BaseHook):
             if C_SchedulerHook.SIM_MODE == MockSimulationMode.BLOCKING:
                 recv_reqs.extend(original_recv_requests(self, *args, **kwargs))
             elif C_SchedulerHook.SIM_MODE == MockSimulationMode.OFFLINE:
-                total_request = -1
-
-                # Initialized
+                # Initializing
                 if not C_SchedulerHook.OFFLINE_RECV_ALL_REQUEST:
-                    while True:
-                        gen_requests = []
-                        extra_requests = []
-                        time.sleep(0.001)  # waiting requests
+                    gen_requests = []
+                    extra_requests = []
+                    time.sleep(0.05)  # waiting requests
 
-                        reqs = original_recv_requests(self, *args, **kwargs)
+                    reqs = original_recv_requests(self, *args, **kwargs)
 
-                        for req in reqs:
-                            if req.__class__.__name__ == "TokenizedGenerateReqInput":
-                                gen_requests.append(req)
-                            else:
-                                extra_requests.append(req)
+                    for req in reqs:
+                        if req.__class__.__name__ == "TokenizedGenerateReqInput":
+                            gen_requests.append(req)
+                        else:
+                            # Such as: /profile_start, /flush_cache, etc.
+                            extra_requests.append(req)
 
-                        # Add requests to future queue
-                        for idx, req in enumerate(gen_requests):
-                            sim_params = req.sampling_params.custom_params["simulation"]
-                            C_SchedulerHook.FUTURE_QUEUE.append(
-                                (
-                                    sim_params["created_time"],
-                                    time.time_ns(),  # The request is not comparable, so add the salt to avoid comparison.
-                                    req,
-                                )
-                            )
-
-                        # Update the total number of requests
-                        if (
-                            total_request == -1
-                            and len(C_SchedulerHook.FUTURE_QUEUE) != 0
-                        ):
-                            _, _, gen_req = C_SchedulerHook.FUTURE_QUEUE[-1]
-                            total_request = gen_req.sampling_params.custom_params[
+                    # Add requests to future queue
+                    for req in gen_requests:
+                        sim_params = None
+                        if req.sampling_params.custom_params is not None:
+                            sim_params = req.sampling_params.custom_params.get(
                                 "simulation"
-                            ]["total_request"]
-                            logger.info(
-                                f"Offline simulation mode enabled. {total_request} requests expected."
+                            )
+                        if sim_params is None:
+                            # There are some warm-up requests when starting the server without --skip-server-warmup.
+                            extra_requests.append(req)
+                            logger.warning(
+                                "Failed to extract the simulation parameters required for simulation from the request. Ignore this warning if the request is a warm-up request."
+                            )
+                            continue
+                        if sim_params.get("queue_start"):
+                            logger.debug(
+                                "Add request to waiting queue with custom queue start timestamp."
                             )
 
-                        if len(extra_requests) != 0:
-                            # Schedule the extra requests immediately.
-                            return extra_requests
+                        C_SchedulerHook.FUTURE_QUEUE.append(
+                            (
+                                sim_params.get("queue_start")
+                                or sim_params["created_time"],
+                                time.time_ns(),  # The request is not comparable, so add the salt to avoid comparison.
+                                req,
+                            )
+                        )
+
+                    if len(C_SchedulerHook.FUTURE_QUEUE) != 0:
+                        _, _, gen_req = C_SchedulerHook.FUTURE_QUEUE[-1]
+                        total_request = gen_req.sampling_params.custom_params[
+                            "simulation"
+                        ]["total_request"]
 
                         if len(C_SchedulerHook.FUTURE_QUEUE) == total_request:
+                            C_SchedulerHook.OFFLINE_RECV_ALL_REQUEST = True
+                            heapq.heapify(C_SchedulerHook.FUTURE_QUEUE)
                             logger.info(
                                 "All requests received. Starting simulation now."
                             )
-                            break
+                        else:
+                            logger.info(
+                                f"Offline simulation mode enabled. {total_request} requests expected in total. Received {len(C_SchedulerHook.FUTURE_QUEUE)} requests so far."
+                            )
+
+                    if len(extra_requests) != 0:
+                        # Schedule the extra requests immediately.
+                        return extra_requests
                 else:
                     # Extra requests include: flush request, abort request, etc.
                     recv_reqs.extend(original_recv_requests(self, *args, **kwargs))
-
-                if (
-                    not C_SchedulerHook.OFFLINE_RECV_ALL_REQUEST
-                    and len(C_SchedulerHook.FUTURE_QUEUE) == total_request
-                ):
-                    C_SchedulerHook.OFFLINE_RECV_ALL_REQUEST = True
-                    heapq.heapify(C_SchedulerHook.FUTURE_QUEUE)
 
                 # Process the arrived requests only after all requests have been added to the future queue
                 current_timestamp = StateManager.get_global_clock()
@@ -631,8 +713,8 @@ class C_SchedulerHook(BaseHook):
                     C_SchedulerHook.OFFLINE_RECV_ALL_REQUEST
                     and len(C_SchedulerHook.FUTURE_QUEUE) > 0
                 ):
-                    created_time, _, req = C_SchedulerHook.FUTURE_QUEUE[0]
-                    if created_time > current_timestamp:
+                    enqueue_time, _, req = C_SchedulerHook.FUTURE_QUEUE[0]
+                    if enqueue_time > current_timestamp:
                         break
                     recv_reqs.append(req)
                     heapq.heappop(C_SchedulerHook.FUTURE_QUEUE)
@@ -647,18 +729,24 @@ class C_SchedulerHook(BaseHook):
                     req_stats.rid = req.rid
                     req_stats.input_length = len(req.input_ids)
                     req_stats.output_length = req.sampling_params.max_new_tokens
+                    simulation_args = req.sampling_params.custom_params["simulation"]
                     if C_SchedulerHook.SIM_MODE == MockSimulationMode.BLOCKING:
-                        if not hasattr(req, "created_time"):
-                            logger.warning("Request's created time is missing.")
-                        req_stats.created_time = getattr(req, "created_time", now)
+                        if "server_created_time" not in simulation_args:
+                            logger.warning(
+                                "The request's creation time is missing, which may cause the TTFT to be inaccurate."
+                            )
+                        req_stats.created_time = simulation_args.get(
+                            "server_created_time", now
+                        )
                         req_stats.last_event_time = req_stats.created_time
                         req_stats.queue_start = now
                     elif C_SchedulerHook.SIM_MODE == MockSimulationMode.OFFLINE:
-                        simulation_args = req.sampling_params.custom_params[
-                            "simulation"
-                        ]
                         req_stats.created_time = simulation_args["created_time"]
                         req_stats.last_event_time = req_stats.created_time
+                        # Align with the real queue start timestamp if queue_start is not None. For debugging only.
+                        queue_start = simulation_args.get("queue_start")
+                        if queue_start is not None:
+                            StateManager.set_global_clock(queue_start)
                         req_stats.queue_start = StateManager.get_global_clock()
 
             if recv_reqs and C_SchedulerHook.LAST_CPU_TS == 0:

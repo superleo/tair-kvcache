@@ -149,6 +149,7 @@ cuda_library(
         "-std=c++20",
         "--compiler-options=-fPIC",
     ],
+    defines = ["USING_CUDA=1"],
     target_compatible_with = select({
         ":using_cuda": [],
         "//conditions:default": ["@platforms//:incompatible"],

@@ -80,6 +80,7 @@ cc_library(
     }) + select({
         ":enable_hf3fs": [
             "hf3fs_cuda_util.h",
+            "hf3fs_gpu_util_alias.h",
             "hf3fs_musa_util.h",
             "hf3fs_mempool.h",
             "hf3fs_sdk.h",

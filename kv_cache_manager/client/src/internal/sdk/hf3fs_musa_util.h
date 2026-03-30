@@ -72,23 +72,6 @@ private:
     musaStream_t musa_stream_{nullptr};
 };
 
-#else
-
-class Hf3fsMusaUtil final {
-public:
-    Hf3fsMusaUtil() = default;
-    ~Hf3fsMusaUtil() { Release(); }
-
-public:
-    bool Init() { return true; }
-    void Release() {}
-    void CopyAsyncHostToDevice(void *dst, const void *src, size_t size) {}
-    void CopyAsyncDeviceToHost(void *dst, const void *src, size_t size) {}
-    void Sync() {}
-    bool RegisterHost(void *ptr, size_t size) const { return true; }
-    void UnregisterHost(void *ptr) const {}
-};
-
 #endif
 
 } // namespace kv_cache_manager
